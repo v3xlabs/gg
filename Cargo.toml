@@ -1,0 +1,28 @@
+[package]
+name = "gg"
+version = "0.0.1"
+edition = "2024"
+description = "A local Git client with a repository switcher and a commit graph"
+repository = "https://github.com/v3xlabs/gg"
+license = "MIT"
+
+[dependencies]
+gix = "0.87"
+image = {version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "ico"]}
+# "advanced" is what exposes the widget operations, which is how the launcher puts the
+# cursor in its own field the moment it opens.
+iced = {version = "0.14", features = ["advanced", "canvas", "image", "svg"]}
+# default-features off keeps syntect on fancy-regex instead of the C oniguruma, which
+# keeps the Nix build pure Rust. two-face carries the syntaxes Sublime's default set
+# lacks, Nix and TOML among them.
+serde = {version = "1", features = ["derive"]}
+sha2 = "0.11"
+syntect = {version = "5", default-features = false, features = ["default-fancy"]}
+toml = "1"
+two-face = {version = "0.4", default-features = false, features = ["syntect-fancy"]}
+# The desktop portal backend rather than the default gtk3 one: gg already talks to
+# the portal for the colour scheme, and the alternative pulls a whole toolkit into the
+# closure for one file chooser.
+rfd = {version = "0.17", default-features = false, features = ["xdg-portal"]}
+ureq = "3"
+zbus = "5"

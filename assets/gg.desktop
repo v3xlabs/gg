@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=gg
+GenericName=Git Client
+Comment=A local Git client with a repository switcher and a commit graph
+Exec=gg %f
+Icon=gg
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=gitgui;git;gui;vcs;commit;graph;
+StartupWMClass=gg
