@@ -1,4 +1,4 @@
-use super::{BODY, Message, SMALL, TITLE, theme};
+use super::{BODY, Message, SMALL, TITLE, icons, theme};
 use iced::widget::{Column, Space, button, checkbox, column, container, row, text};
 use iced::{Element, Fill, Length, Theme};
 use std::collections::HashSet;
@@ -15,8 +15,15 @@ pub struct Destination {
     pub exists: bool,
 }
 
-/// Which remotes a fetch or a push reaches, asked only when the repository has more than
-/// one of them.
+/// Which of a repository's two remembered answers a dialog is about.
+#[derive(Debug, Clone, Copy)]
+pub enum Direction {
+    Fetch,
+    Push,
+}
+
+/// Which remotes a fetch or a push reaches. A push always asks; a fetch asks once there is
+/// more than one remote to choose between.
 pub enum Dialog {
     Fetch {
         remotes: Vec<String>,
@@ -31,21 +38,30 @@ pub enum Dialog {
 }
 
 impl Dialog {
-    /// Every remote starts checked: a fetch writes nothing outside `refs/remotes`, so the
-    /// wide answer is the safe one.
-    pub fn fetch(remotes: Vec<String>) -> Self {
-        let chosen = remotes.iter().cloned().collect();
+    /// Opens on the answer this repository gave last time. With no answer to go back to
+    /// every remote is checked, because a fetch writes nothing outside `refs/remotes` and
+    /// the wide default costs nothing.
+    pub fn fetch(remotes: Vec<String>, before: &[String]) -> Self {
+        let chosen = match remembered(&remotes, before) {
+            Some(chosen) => chosen,
+            None => remotes.iter().cloned().collect(),
+        };
 
         Self::Fetch { remotes, chosen }
     }
 
-    /// Nothing starts checked, unlike a fetch: a push writes to somebody else's repository
-    /// and the reader should name which one.
-    pub fn push(branch: String, destinations: Vec<Destination>) -> Self {
+    /// The same, except that with no answer to go back to nothing is checked: a push writes
+    /// into somebody else's repository, so the first one is named rather than assumed.
+    pub fn push(branch: String, destinations: Vec<Destination>, before: &[String]) -> Self {
+        let remotes: Vec<String> = destinations
+            .iter()
+            .map(|destination| destination.remote.clone())
+            .collect();
+
         Self::Push {
             branch,
             destinations,
-            chosen: HashSet::new(),
+            chosen: remembered(&remotes, before).unwrap_or_default(),
             upstream: false,
         }
     }
@@ -81,6 +97,19 @@ impl Dialog {
                 .collect(),
         }
     }
+}
+
+/// The remembered answer, narrowed to the remotes that are still there. `None` when that
+/// leaves nothing, so a repository whose remotes were all renamed opens on its default
+/// rather than on an empty dialog with a dead button.
+fn remembered(remotes: &[String], before: &[String]) -> Option<HashSet<String>> {
+    let chosen: HashSet<String> = remotes
+        .iter()
+        .filter(|remote| before.contains(remote))
+        .cloned()
+        .collect();
+
+    (!chosen.is_empty()).then_some(chosen)
 }
 
 pub fn view(
@@ -206,6 +235,35 @@ fn sending(destination: &Destination, branch: &str) -> String {
     }
 }
 
+/// Drawn rather than taken from `checkbox`. The whole row is the button that toggles it, so
+/// a `checkbox` here would be one with no `on_toggle`, and iced draws that disabled: an
+/// unchecked disabled box has no visible edge in any palette gg ships.
+fn mark(checked: bool) -> Element<'static, Message> {
+    let inside: Element<'static, Message> = match checked {
+        true => icons::sized(icons::Glyph::Check, 11.0),
+        false => Space::new().into(),
+    };
+
+    container(inside)
+        .width(Length::Fixed(15.0))
+        .height(Length::Fixed(15.0))
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .style(|theme: &Theme| {
+            let palette = theme.extended_palette();
+
+            container::Style {
+                border: iced::Border {
+                    color: palette.background.strong.color,
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                ..container::Style::default()
+            }
+        })
+        .into()
+}
+
 fn line(
     remote: &str,
     host: Option<String>,
@@ -222,7 +280,7 @@ fn line(
     }
 
     button(
-        row![checkbox(checked).size(15), lines, Space::new().width(Fill),]
+        row![mark(checked), lines, Space::new().width(Fill)]
             .spacing(8)
             .align_y(iced::Alignment::Center),
     )

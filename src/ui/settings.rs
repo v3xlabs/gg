@@ -24,14 +24,22 @@ impl Category {
     /// sidebar always lists.
     const ALL: [Self; 3] = [Self::Appearance, Self::Repositories, Self::About];
 
-    fn title(&self) -> String {
+    /// A repository is titled the way the rest of the window titles it, which is the name
+    /// the reader set if they set one.
+    fn title(&self, app: &App) -> String {
         match self {
             Self::Appearance => "Appearance".to_owned(),
             Self::Repositories => "Repositories".to_owned(),
-            Self::Repository(path) => super::name_of(path),
+            Self::Repository(path) => shown_name(app, path),
             Self::About => "About".to_owned(),
         }
     }
+}
+
+fn shown_name(app: &App, path: &Path) -> String {
+    app.state
+        .name(path)
+        .map_or_else(|| super::name_of(path), str::to_owned)
 }
 
 /// What the page holds while it is open, and nothing that outlives it.
@@ -47,6 +55,18 @@ pub struct Form {
     pub hovered: Option<PathBuf>,
     pub discovered: Vec<PathBuf>,
     pub picker: Option<Picker>,
+    /// The name being typed on a repository's own page, and the remotes read when that page
+    /// opened. Both belong to one repository, so both are dropped when another one opens.
+    pub name: String,
+    pub remotes: Vec<Remote>,
+}
+
+#[derive(Debug)]
+pub struct Remote {
+    pub name: String,
+    /// What git would fetch from. A remote can push somewhere else, and gg does not read
+    /// that yet.
+    pub url: String,
 }
 
 #[derive(Debug)]
@@ -64,7 +84,7 @@ pub fn view<'a>(app: &'a App, category: &'a Category) -> Element<'a, Message> {
     };
 
     row![
-        sidebar(category),
+        sidebar(app, category),
         container(scrollable(body.spacing(18).padding([0, 14])).height(Fill))
             .padding(20)
             .width(Fill)
@@ -74,11 +94,11 @@ pub fn view<'a>(app: &'a App, category: &'a Category) -> Element<'a, Message> {
     .into()
 }
 
-fn sidebar(current: &Category) -> Element<'static, Message> {
+fn sidebar(app: &App, current: &Category) -> Element<'static, Message> {
     let row = |category: Category, current: &Category| {
         let chosen = &category == current;
 
-        button(text(category.title()).size(BODY))
+        button(text(category.title(app)).size(BODY))
             .on_press(Message::SettingsOpened(category))
             .style(if chosen {
                 button::secondary
@@ -273,9 +293,8 @@ fn repositories(app: &App) -> Column<'_, Message> {
     Column::with_children(page)
 }
 
-/// One repository, reached by right-clicking it rather than by finding it in the list. The
-/// icon is what there is to set today; what else belongs to a repository rather than to gg
-/// lands here as it is written.
+/// One repository, reached by right-clicking it rather than by finding it in the list. What
+/// belongs to a repository rather than to gg lands here as it is written.
 fn repository<'a>(app: &'a App, path: &'a Path) -> Column<'a, Message> {
     let icon = app.state.icon(path);
     let picking = app
@@ -285,7 +304,7 @@ fn repository<'a>(app: &'a App, path: &'a Path) -> Column<'a, Message> {
         .is_some_and(|picker| picker.repository == path);
 
     let mut page: Vec<Element<'a, Message>> = vec![
-        text(super::name_of(path)).size(TITLE).into(),
+        text(shown_name(app, path)).size(TITLE).into(),
         text(path.display().to_string())
             .size(SMALL)
             .style(text::secondary)
@@ -314,7 +333,56 @@ fn repository<'a>(app: &'a App, path: &'a Path) -> Column<'a, Message> {
         page.push(icon_choices(picker));
     }
 
+    page.push(
+        column![
+            text("Name").size(BODY),
+            note("what this repository is called in the window. empty is the folder name"),
+            text_input(&super::name_of(path), &app.form.name)
+                .on_input(Message::RepositoryNameChanged)
+                .on_submit(Message::RepositoryNamed)
+                .padding([5, 8])
+                .size(BODY)
+                .width(Length::Fixed(320.0)),
+        ]
+        .spacing(4)
+        .into(),
+    );
+
+    page.push(remotes(&app.form.remotes).into());
+
     Column::with_children(page)
+}
+
+/// Read when the page opens rather than on every frame. gg does not change a remote yet, so
+/// this is what the repository has, not something to edit.
+fn remotes(found: &[Remote]) -> Column<'_, Message> {
+    if found.is_empty() {
+        return column![text("Remotes").size(BODY), note("this repository has none"),].spacing(4);
+    }
+
+    let rows = found.iter().map(|remote| {
+        row![
+            text(remote.name.as_str())
+                .size(BODY)
+                .width(Length::Fixed(110.0)),
+            text(remote.url.as_str())
+                .size(SMALL)
+                .style(text::secondary)
+                .wrapping(Wrapping::None),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center)
+        .into()
+    });
+
+    column![
+        text("Remotes").size(BODY),
+        container(Column::with_children(rows).spacing(3))
+            .padding([6, 10])
+            .width(Fill)
+            .style(container::bordered_box),
+    ]
+    .spacing(4)
 }
 
 fn known_repository<'a>(

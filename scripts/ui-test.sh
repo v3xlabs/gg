@@ -36,7 +36,7 @@ binary="${GG_BIN:-./target/debug/gg}"
 width="${GG_WIDTH:-1600}"
 height="${GG_HEIGHT:-1000}"
 
-for tool in Xvfb xdotool import; do
+for tool in Xvfb xdotool import bwrap; do
   command -v "$tool" >/dev/null || {
     echo "$tool missing: run inside 'nix develop .#testing'" >&2
     exit 1
@@ -101,8 +101,35 @@ if [ -z "$attached" ] && [ "${GG_WATCH:-1}" != "0" ] && command -v x11vnc >/dev/
   echo "watching: vncviewer localhost:$vnc_port"
 fi
 
+# gg shells out to real git, so it runs sandboxed here for the same reason the tests do:
+# nothing it spawns can read the machine's git configuration or reach a signing key. The
+# repository under test is mounted at /repo and the build directory at /build, so no path
+# from the developer's home exists inside, the X socket and the state directory aside.
+#
 # WAYLAND_DISPLAY has to go, or winit ignores DISPLAY and talks to the real compositor.
-env -u WAYLAND_DISPLAY DISPLAY="$display" "$binary" "$repo" > "$outdir/app.log" 2>&1 &
+env -u WAYLAND_DISPLAY bwrap \
+  --ro-bind /nix/store /nix/store \
+  --ro-bind "$PWD/target" /build \
+  --bind "$(cd "$(dirname "$repo")" && pwd)" /repo \
+  --bind "$XDG_DATA_HOME" /state \
+  --ro-bind /tmp/.X11-unix /tmp/.X11-unix \
+  --ro-bind-try /etc/fonts /etc/fonts \
+  --ro-bind-try /run/opengl-driver /run/opengl-driver \
+  --dev-bind-try /dev/dri /dev/dri \
+  --proc /proc \
+  --dev /dev \
+  --tmpfs /tmp/home \
+  --setenv HOME /tmp/home \
+  --setenv XDG_DATA_HOME /state \
+  --setenv DISPLAY "$display" \
+  --setenv LD_LIBRARY_PATH "${LD_LIBRARY_PATH:-}" \
+  --unsetenv SSH_AUTH_SOCK \
+  --unsetenv GPG_AGENT_INFO \
+  --unshare-user --unshare-pid --unshare-net --unshare-uts \
+  --die-with-parent \
+  --chdir /repo \
+  -- "/build/debug/$(basename "$binary")" "/repo/$(basename "$repo")" \
+  > "$outdir/app.log" 2>&1 &
 app_pid=$!
 
 window=""

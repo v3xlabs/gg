@@ -13,6 +13,9 @@ in
       [
         pkgs.git
         pkgs.rust-analyzer
+        # scripts/test.sh runs every test binary inside this, so the git those tests
+        # spawn cannot reach the machine's own configuration or its keys.
+        pkgs.bubblewrap
       ]
       ++ extraPackages;
 

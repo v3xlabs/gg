@@ -217,8 +217,9 @@ const SEPARATED_ABOVE: usize = 40;
 /// The optional columns of the history; the title is always there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
+/// The branch / tag column is not here: it carries the head glyph and it is where a new
+/// branch is named, so a history without it is missing something a reader needs.
 pub struct Columns {
-    pub labels: bool,
     pub author: bool,
     pub when: bool,
     pub hash: bool,
@@ -227,7 +228,6 @@ pub struct Columns {
 impl Default for Columns {
     fn default() -> Self {
         Self {
-            labels: true,
             author: true,
             when: true,
             hash: true,
@@ -283,7 +283,6 @@ struct Drag {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryColumn {
-    Labels,
     Author,
     When,
     Hash,
@@ -437,6 +436,23 @@ impl Row {
             Self::Item(label, _) | Self::Group(label, _) => label,
         }
     }
+
+    /// A group of one is two presses to reach one action, so it is drawn as that action
+    /// with the group's name in front of it: `delete` over `branch fix/hello` becomes
+    /// `delete branch fix/hello`.
+    fn flattened(self) -> Self {
+        let Self::Group(name, mut children) = self else {
+            return self;
+        };
+
+        match children.len() {
+            1 => {
+                let (label, message) = children.remove(0);
+                Self::Item(format!("{name} {label}"), message)
+            }
+            _ => Self::Group(name, children),
+        }
+    }
 }
 
 fn item(label: &str, message: Option<Message>) -> Row {
@@ -495,7 +511,10 @@ fn context_items(target: &Target) -> Vec<Row> {
                 }
                 _ => {
                     items.push(item("check out", None));
-                    items.push(item("merge into the current branch", None));
+                    // Not "merge into the current branch": gg does not make merge commits,
+                    // so the way to get this branch's work into the current one is to
+                    // replay the current one on top of it.
+                    items.push(item("rebase the current branch onto this", None));
                     items.push(item("rename", None));
                     items.push(Row::Group(
                         "delete".to_owned(),
@@ -536,7 +555,10 @@ fn context_items(target: &Target) -> Vec<Row> {
 }
 
 fn context_menu(context: &Context) -> Element<'_, Message> {
-    let entries = context_items(&context.target);
+    let entries: Vec<Row> = context_items(&context.target)
+        .into_iter()
+        .map(Row::flattened)
+        .collect();
     let open = context
         .open
         .filter(|index| matches!(entries.get(*index), Some(Row::Group(..))));
@@ -614,24 +636,28 @@ fn context_row(
 ) -> Element<'_, Message> {
     let enabled = message.is_some() || !dims;
 
-    button(line)
-        .on_press_maybe(message)
-        .style(move |theme: &Theme, status| {
-            let palette = theme.extended_palette();
+    button(
+        container(line)
+            .height(Fill)
+            .align_y(iced::alignment::Vertical::Center),
+    )
+    .on_press_maybe(message)
+    .style(move |theme: &Theme, status| {
+        let palette = theme.extended_palette();
 
-            button::Style {
-                text_color: if enabled {
-                    palette.background.base.text
-                } else {
-                    palette.background.weak.text
-                },
-                ..theme::row(theme, status)
-            }
-        })
-        .padding([0, 10])
-        .width(Fill)
-        .height(Length::Fixed(CONTEXT_ROW))
-        .into()
+        button::Style {
+            text_color: if enabled {
+                palette.background.base.text
+            } else {
+                palette.background.weak.text
+            },
+            ..theme::row(theme, status)
+        }
+    })
+    .padding([0, 10])
+    .width(Fill)
+    .height(Length::Fixed(CONTEXT_ROW))
+    .into()
 }
 
 fn context_panel(rows: Column<'_, Message>) -> Element<'_, Message> {
@@ -1007,6 +1033,8 @@ pub enum Message {
     RemoteFinished(Result<String, String>),
     BranchNameChanged(String),
     BranchCreated,
+    RepositoryNameChanged(String),
+    RepositoryNamed,
     ContextEntered(Option<usize>),
 }
 
@@ -1076,6 +1104,7 @@ impl App {
             state,
         };
         app.rescan_directories();
+        app.apply_names();
         let reading = app.read_repository();
 
         (app, reading)
@@ -1316,6 +1345,7 @@ impl App {
         }
 
         self.repositories.push(Entry::read(path.clone()));
+        self.apply_names();
         self.state.paths.push(path);
         self.save_state();
         self.rescan_directories();
@@ -1669,6 +1699,65 @@ impl App {
         }
     }
 
+    /// Taken on enter, and again when the page is left: a name typed and then navigated
+    /// away from was still meant.
+    fn take_name(&mut self) {
+        let Page::Settings(settings::Category::Repository(path)) = &self.page else {
+            return;
+        };
+
+        let path = path.clone();
+        let name = self.form.name.clone();
+        if self.state.name(&path).unwrap_or_default() == name.trim() {
+            return;
+        }
+
+        self.state.set_name(&path, name);
+        self.apply_names();
+        self.save_state();
+    }
+
+    /// Everything that shows a repository reads its name off the sidebar entry or off the
+    /// open repository, so the name a reader set is written into both rather than looked up
+    /// at each of the places it is drawn.
+    fn apply_names(&mut self) {
+        let named = |state: &config::State, path: &Path| {
+            state
+                .name(path)
+                .map_or_else(|| name_of(path), str::to_owned)
+        };
+
+        for entry in &mut self.repositories {
+            entry.name = named(&self.state, &entry.path);
+        }
+        if let Ok(repository) = &mut self.repository {
+            repository.name = named(&self.state, &repository.path);
+        }
+    }
+
+    /// Which remotes this repository checked last time it was asked. Empty when it has
+    /// never been asked, which is what puts a dialog on its default.
+    fn remembered(&self, path: &Path, direction: remotes::Direction) -> Vec<String> {
+        let Some(chosen) = self.state.chosen(path) else {
+            return Vec::new();
+        };
+
+        match direction {
+            remotes::Direction::Fetch => chosen.fetch.clone(),
+            remotes::Direction::Push => chosen.push.clone(),
+        }
+    }
+
+    fn remember(&mut self, path: &Path, direction: remotes::Direction, taken: Vec<String>) {
+        let chosen = self.state.chosen_mut(path);
+        match direction {
+            remotes::Direction::Fetch => chosen.fetch = taken,
+            remotes::Direction::Push => chosen.push = taken,
+        }
+
+        self.save_state();
+    }
+
     fn fetch(&mut self, remotes: Vec<String>) -> Task<Message> {
         let named = remotes.join(", ");
 
@@ -1916,13 +2005,27 @@ impl App {
                 self.rebuild_labels();
             }
             Message::SettingsOpened(category) => {
+                self.take_name();
                 self.menu = None;
                 self.inbox = false;
                 self.context = None;
+
+                // The name and the remotes belong to the repository the page is about, so
+                // they are read when it opens rather than on every frame that draws it.
+                if let settings::Category::Repository(path) = &category {
+                    self.form.name = self.state.name(path).unwrap_or_default().to_owned();
+                    self.form.remotes = remotes_of(path);
+                }
+
                 self.page = Page::Settings(category);
                 self.rescan_directories();
             }
-            Message::SettingsClosed => self.page = Page::Repository,
+            Message::RepositoryNameChanged(name) => self.form.name = name,
+            Message::RepositoryNamed => self.take_name(),
+            Message::SettingsClosed => {
+                self.take_name();
+                self.page = Page::Repository;
+            }
             Message::InboxToggled => {
                 self.menu = None;
                 self.inbox = !self.inbox;
@@ -2234,7 +2337,6 @@ impl App {
             Message::ColumnToggled(column) => {
                 let columns = &mut self.columns;
                 match column {
-                    HistoryColumn::Labels => columns.labels = !columns.labels,
                     HistoryColumn::Author => columns.author = !columns.author,
                     HistoryColumn::When => columns.when = !columns.when,
                     HistoryColumn::Hash => columns.hash = !columns.hash,
@@ -2293,6 +2395,7 @@ impl App {
                     return Task::none();
                 };
                 let remotes = repository.remote_names.clone();
+                let path = repository.path.clone();
 
                 match remotes.len() {
                     0 => {
@@ -2301,9 +2404,15 @@ impl App {
                         ));
                     }
                     1 => return self.fetch(remotes),
-                    _ => self.dialog = Some(remotes::Dialog::fetch(remotes)),
+                    _ => {
+                        let before = self.remembered(&path, remotes::Direction::Fetch);
+                        self.dialog = Some(remotes::Dialog::fetch(remotes, &before));
+                    }
                 }
             }
+            // Always through the dialog, however many remotes there are: the dialog is
+            // where a push says what it would send and where the upstream is opted into,
+            // and a repository with one remote needs both of those as much as any other.
             Message::PushPressed => {
                 let Ok(repository) = &self.repository else {
                     return Task::none();
@@ -2315,19 +2424,18 @@ impl App {
                     return Task::none();
                 };
                 let remotes = repository.remote_names.clone();
+                let path = repository.path.clone();
 
-                match remotes.len() {
-                    0 => {
-                        self.report = Some(Report::Failed(
-                            "this repository has no remote to push to".to_owned(),
-                        ));
-                    }
-                    1 => return self.push(branch, remotes, false),
-                    _ => {
-                        let destinations = self.destinations(&branch, &remotes);
-                        self.dialog = Some(remotes::Dialog::push(branch, destinations));
-                    }
+                if remotes.is_empty() {
+                    self.report = Some(Report::Failed(
+                        "this repository has no remote to push to".to_owned(),
+                    ));
+                    return Task::none();
                 }
+
+                let destinations = self.destinations(&branch, &remotes);
+                let before = self.remembered(&path, remotes::Direction::Push);
+                self.dialog = Some(remotes::Dialog::push(branch, destinations, &before));
             }
             Message::BranchPressed => {
                 let Ok(repository) = &self.repository else {
@@ -2347,8 +2455,7 @@ impl App {
                     .and_then(|index| repository.tops.get(index).copied());
 
                 // The field is drawn in the branch / tag column of the row HEAD is on, so
-                // both the column and that row have to be on screen for it to be typed in.
-                self.columns.labels = true;
+                // that row has to be brought on screen for it to be typed in.
                 self.diff = None;
                 self.branch_name = Some(String::new());
                 self.report = None;
@@ -2406,13 +2513,22 @@ impl App {
                 let Some(dialog) = self.dialog.take() else {
                     return Task::none();
                 };
+                let Ok(path) = self.repository.as_ref().map(|open| open.path.clone()) else {
+                    return Task::none();
+                };
                 let taken = dialog.taken();
 
                 return match dialog {
-                    remotes::Dialog::Fetch { .. } => self.fetch(taken),
+                    remotes::Dialog::Fetch { .. } => {
+                        self.remember(&path, remotes::Direction::Fetch, taken.clone());
+                        self.fetch(taken)
+                    }
                     remotes::Dialog::Push {
                         branch, upstream, ..
-                    } => self.push(branch, taken, upstream),
+                    } => {
+                        self.remember(&path, remotes::Direction::Push, taken.clone());
+                        self.push(branch, taken, upstream)
+                    }
                 };
             }
             Message::RemoteFinished(result) => match result {
@@ -3033,6 +3149,29 @@ fn default_panes() -> (pane_grid::State<Pane>, Option<pane_grid::Split>) {
     }
 
     (state, sidebar)
+}
+
+/// Read when a repository's own settings page opens, which is the only surface that wants
+/// the URLs rather than just the names.
+fn remotes_of(path: &Path) -> Vec<settings::Remote> {
+    let Ok(handle) = gix::open(path) else {
+        return Vec::new();
+    };
+
+    handle
+        .remote_names()
+        .iter()
+        .filter_map(|name| {
+            let name = name.to_string();
+            let remote = handle.find_remote(name.as_str()).ok()?;
+            let url = remote.url(gix::remote::Direction::Fetch)?.to_bstring();
+
+            Some(settings::Remote {
+                name,
+                url: url.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// A remote whose URL will not parse has no host to show.
@@ -3685,16 +3824,15 @@ impl App {
         entries = entries.push(spacer(tail));
 
         let graph = stack![lanes].push_under(shades);
-        let mut columns = row![].align_y(iced::Alignment::Start);
-        if self.columns.labels {
-            columns = columns.push(names).push(
-                mouse_area(joint)
-                    .interaction(mouse::Interaction::ResizingHorizontally)
-                    .on_enter(Message::DividerHovered(Divider::Labels))
-                    .on_exit(Message::DividerLeft)
-                    .on_press(Message::DividerPressed(Divider::Labels)),
-            );
-        }
+        let columns = row![
+            names,
+            mouse_area(joint)
+                .interaction(mouse::Interaction::ResizingHorizontally)
+                .on_enter(Message::DividerHovered(Divider::Labels))
+                .on_exit(Message::DividerLeft)
+                .on_press(Message::DividerPressed(Divider::Labels)),
+        ]
+        .align_y(iced::Alignment::Start);
 
         // The coloured strip beside the graph is that divider, so it is dragged from here.
         let handle = mouse_area(edge)
@@ -3747,13 +3885,12 @@ impl App {
             self.hovered_divider == Some(divider)
                 || self.drag.is_some_and(|drag| drag.divider == divider)
         };
-        let mut line = row![].align_y(iced::Alignment::Center);
+        let mut line = row![
+            heading("branch / tag", Length::Fixed(self.widths.labels)),
+            divider_handle(Divider::Labels, lit(Divider::Labels)),
+        ]
+        .align_y(iced::Alignment::Center);
 
-        if self.columns.labels {
-            line = line
-                .push(heading("branch / tag", Length::Fixed(self.widths.labels)))
-                .push(divider_handle(Divider::Labels, lit(Divider::Labels)));
-        }
         line = line
             .push(heading("graph", Length::Fixed(graph_width)))
             .push(divider_handle(Divider::Graph, lit(Divider::Graph)))
@@ -3836,7 +3973,6 @@ fn column_menu(columns: Columns) -> Element<'static, Message> {
     container(
         Column::with_children(vec![
             text("Columns").size(SMALL).style(text::secondary).into(),
-            item("Labels", columns.labels, HistoryColumn::Labels),
             item("Author", columns.author, HistoryColumn::Author),
             item("Date", columns.when, HistoryColumn::When),
             item("Hash", columns.hash, HistoryColumn::Hash),

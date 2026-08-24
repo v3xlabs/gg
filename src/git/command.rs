@@ -323,7 +323,54 @@ impl std::error::Error for Error {}
 mod tests {
     use super::*;
 
+    /// Asked of git itself rather than of the environment, because what matters is what
+    /// git can reach, not which variables happen to be set.
+    ///
+    /// These tests commit, clone, fetch and push. On a developer's machine git would read
+    /// their global configuration, and through it their signing key and their agent, so a
+    /// test run could make a real key sign something. `scripts/test.sh` and
+    /// `nix flake check` each run this binary in a sandbox where none of that exists.
+    /// Anywhere else the tests stop here.
+    fn sandboxed() {
+        let global = Command::new("git")
+            .args(["config", "--global", "--list"])
+            .output()
+            .expect("run git config");
+
+        assert!(
+            global.stdout.is_empty(),
+            "git can read a global configuration, so this is not a sandbox. \
+             Run scripts/test.sh or `nix flake check`.",
+        );
+        assert!(
+            std::env::var_os("SSH_AUTH_SOCK").is_none(),
+            "an ssh agent is reachable, so this is not a sandbox. \
+             Run scripts/test.sh or `nix flake check`.",
+        );
+
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let occupied = home
+            .as_deref()
+            .and_then(|home| std::fs::read_dir(home).ok())
+            .is_some_and(|mut entries| entries.next().is_some());
+
+        assert!(
+            !occupied,
+            "the home directory {home:?} has something in it, so this is not a sandbox. \
+             Run scripts/test.sh or `nix flake check`.",
+        );
+        assert!(
+            !std::path::Path::new("/home").exists(),
+            "/home exists, so a path from the machine reaches in here. \
+             Run scripts/test.sh or `nix flake check`.",
+        );
+    }
+
+    /// Under [`sandboxed`] the whole filesystem outside the store is throwaway, so the
+    /// temporary directory is the right place for these and nothing survives the run.
     fn scratch_repository(name: &str) -> PathBuf {
+        sandboxed();
+
         let path = std::env::temp_dir().join(format!("gg-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create the scratch directory");
@@ -362,9 +409,15 @@ mod tests {
         std::fs::remove_dir_all(&path).expect("clean up");
     }
 
+    /// A sandbox has no global configuration, so the identity a commit needs is given here.
     fn git_in(path: &PathBuf, args: &[&str]) {
         let status = Command::new("git")
-            .args(["-c", "user.email=gg@example.com", "-c", "user.name=gg"])
+            .args([
+                "-c",
+                "user.email=gg@test.invalid",
+                "-c",
+                "user.name=gg test",
+            ])
             .args(args)
             .current_dir(path)
             .status()
@@ -390,7 +443,7 @@ mod tests {
         let origin = scratch_repository(name);
         commit_in(&origin, "a.txt", "one");
 
-        let clone = origin.with_file_name(format!("{}-clone", origin.display()));
+        let clone = std::env::temp_dir().join(format!("gg-{}-{name}-clone", std::process::id()));
         let _ = std::fs::remove_dir_all(&clone);
         let status = Command::new("git")
             .args(["clone", "--quiet"])

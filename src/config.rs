@@ -203,6 +203,10 @@ pub struct State {
     pub widths: crate::ui::Widths,
     #[serde(default)]
     pub icons: Vec<Icon>,
+    #[serde(default)]
+    pub names: Vec<Name>,
+    #[serde(default)]
+    pub chosen: Vec<Chosen>,
     /// Writing over a file nobody could parse would throw away a reader's repositories to
     /// save a window position.
     #[serde(skip)]
@@ -275,6 +279,69 @@ impl State {
             file,
         });
     }
+
+    /// What this repository is called in the window, when the folder name is not what the
+    /// reader wants to read.
+    pub fn name(&self, repository: &Path) -> Option<&str> {
+        self.names
+            .iter()
+            .find(|name| name.repository == repository)
+            .map(|name| name.name.as_str())
+    }
+
+    /// An empty name is how a reader asks for the folder name back.
+    pub fn set_name(&mut self, repository: &Path, name: String) {
+        self.names.retain(|held| held.repository != repository);
+
+        if !name.trim().is_empty() {
+            self.names.push(Name {
+                repository: repository.to_owned(),
+                name: name.trim().to_owned(),
+            });
+        }
+    }
+
+    pub fn chosen(&self, repository: &Path) -> Option<&Chosen> {
+        self.chosen
+            .iter()
+            .find(|chosen| chosen.repository == repository)
+    }
+
+    pub fn chosen_mut(&mut self, repository: &Path) -> &mut Chosen {
+        if let Some(index) = self
+            .chosen
+            .iter()
+            .position(|chosen| chosen.repository == repository)
+        {
+            return &mut self.chosen[index];
+        }
+
+        self.chosen.push(Chosen {
+            repository: repository.to_owned(),
+            fetch: Vec::new(),
+            push: Vec::new(),
+        });
+
+        self.chosen.last_mut().expect("just pushed")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Name {
+    pub repository: PathBuf,
+    pub name: String,
+}
+
+/// Which remotes were checked the last time a fetch or a push asked about this repository.
+/// A remote that has since gone is dropped when the answer is read back, so a renamed
+/// remote does not leave a dialog checking something that is not there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Chosen {
+    pub repository: PathBuf,
+    #[serde(default)]
+    pub fetch: Vec<String>,
+    #[serde(default)]
+    pub push: Vec<String>,
 }
 
 /// Explicit entries first and in the order they were written, then whatever the scan turns

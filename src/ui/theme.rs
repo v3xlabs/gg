@@ -230,16 +230,25 @@ pub fn chrome(theme: &Theme) -> iced::widget::container::Style {
 /// A row or a control that says it takes a press by lighting up under the pointer. The one
 /// style the toolbar, the context menus and the remote dialog share, so a pressable thing
 /// looks the same wherever it is drawn.
+///
+/// The fill is the text colour at a low alpha rather than a palette step. A step would have
+/// to be picked against the surface underneath, and these three surfaces are not the same
+/// one: `chrome` already paints the toolbar in `background.strong`, so a control filling
+/// with `background.strong` on hover was drawing itself in the colour it sits on and no
+/// hover showed at all. An overlay lightens a dark theme and darkens a light one, whatever
+/// it is over.
 pub fn row(theme: &Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
     let palette = theme.extended_palette();
-    let lit = matches!(
-        status,
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
-    );
+    let ink = palette.background.base.text;
+    let wash = match status {
+        iced::widget::button::Status::Hovered => Some(Color { a: 0.10, ..ink }),
+        iced::widget::button::Status::Pressed => Some(Color { a: 0.16, ..ink }),
+        _ => None,
+    };
 
     iced::widget::button::Style {
-        background: lit.then(|| palette.background.strong.color.into()),
-        text_color: palette.background.base.text,
+        background: wash.map(Into::into),
+        text_color: ink,
         border: iced::Border {
             radius: 5.0.into(),
             ..iced::Border::default()

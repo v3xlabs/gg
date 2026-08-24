@@ -56,6 +56,15 @@ impl Row<'_> {
         }
     }
 
+    /// The folder name as well, for a repository the reader has renamed. Somebody who has
+    /// typed the old name for years should still land on it.
+    fn also(&self) -> String {
+        match self {
+            Self::Repository(find) => super::name_of(find.path()),
+            Self::Theme(_) | Self::ChangeTheme => String::new(),
+        }
+    }
+
     fn note(&self) -> String {
         match self {
             Self::Repository(find) => find.path().display().to_string(),
@@ -110,7 +119,9 @@ pub fn matches<'a>(app: &'a App, launcher: &Launcher) -> Vec<Row<'a>> {
     }
 
     all.retain(|row| {
-        row.name().to_lowercase().contains(&query) || row.note().to_lowercase().contains(&query)
+        row.name().to_lowercase().contains(&query)
+            || row.also().to_lowercase().contains(&query)
+            || row.note().to_lowercase().contains(&query)
     });
     all.sort_by_key(|row| !row.name().to_lowercase().contains(&query));
     all
