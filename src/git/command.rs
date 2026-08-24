@@ -54,6 +54,43 @@ impl Git {
         self.run(&args).map(drop)
     }
 
+    /// Only the remote-tracking refs under `refs/remotes` move: no local branch, no commit
+    /// and no working tree file is touched by this.
+    pub fn fetch(&self, remotes: &[String]) -> Result<(), Error> {
+        let mut args = vec!["fetch", "--multiple"];
+        args.extend(remotes.iter().map(String::as_str));
+
+        self.run(&args).map(drop)
+    }
+
+    pub fn push(&self, remote: &str, branch: &str, upstream: bool) -> Result<(), Error> {
+        let mut args = vec!["push"];
+        if upstream {
+            args.push("--set-upstream");
+        }
+        args.push(remote);
+        args.push(branch);
+
+        self.run(&args).map(drop)
+    }
+
+    /// The commits on `branch` that no ref of `remote` reaches, which is what a push would
+    /// send. `None` when git could not answer, so the dialog leaves the count off rather
+    /// than claiming a number it does not have.
+    pub fn unpushed(&self, remote: &str, branch: &str) -> Option<usize> {
+        let scope = format!("--remotes={remote}");
+
+        self.run(&["rev-list", "--count", branch, "--not", &scope])
+            .ok()?
+            .parse()
+            .ok()
+    }
+
+    /// Creates the branch where HEAD is and moves onto it.
+    pub fn branch(&self, name: &str) -> Result<(), Error> {
+        self.run(&["checkout", "-b", name]).map(drop)
+    }
+
     /// Which of these paths git is told to ignore. Asked in one call with the list on
     /// stdin, because `check-ignore` is the only thing that reads every `.gitignore`,
     /// `.git/info/exclude` and core.excludesFile the way git itself does.
@@ -321,6 +358,111 @@ mod tests {
             .expect("read the diff");
 
         assert!(diff.contains("+hello"), "got {diff:?}");
+
+        std::fs::remove_dir_all(&path).expect("clean up");
+    }
+
+    fn git_in(path: &PathBuf, args: &[&str]) {
+        let status = Command::new("git")
+            .args(["-c", "user.email=gg@example.com", "-c", "user.name=gg"])
+            .args(args)
+            .current_dir(path)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn commit_in(path: &PathBuf, file: &str, body: &str) {
+        std::fs::write(path.join(file), body).expect("write the file");
+        git_in(path, &["add", "--", file]);
+        git_in(path, &["commit", "--quiet", "--message", body]);
+    }
+
+    fn head_of(path: &PathBuf) -> String {
+        Git::in_work_dir(path)
+            .run(&["rev-parse", "HEAD"])
+            .expect("read HEAD")
+    }
+
+    /// A pair of repositories, the second cloned from the first, which is the shape every
+    /// remote test below needs.
+    fn cloned(name: &str) -> (PathBuf, PathBuf) {
+        let origin = scratch_repository(name);
+        commit_in(&origin, "a.txt", "one");
+
+        let clone = origin.with_file_name(format!("{}-clone", origin.display()));
+        let _ = std::fs::remove_dir_all(&clone);
+        let status = Command::new("git")
+            .args(["clone", "--quiet"])
+            .arg(&origin)
+            .arg(&clone)
+            .status()
+            .expect("run git clone");
+        assert!(status.success(), "git clone failed");
+
+        (origin, clone)
+    }
+
+    #[test]
+    fn a_fetch_moves_the_remote_ref_and_leaves_the_local_branch_where_it_was() {
+        let (origin, clone) = cloned("fetch");
+        let before = head_of(&clone);
+        commit_in(&origin, "a.txt", "two");
+
+        Git::in_work_dir(&clone)
+            .fetch(&["origin".to_owned()])
+            .expect("fetch");
+
+        let git = Git::in_work_dir(&clone);
+        assert_eq!(head_of(&clone), before, "the local branch moved");
+        assert_eq!(
+            git.run(&["rev-parse", "refs/remotes/origin/main"])
+                .expect("read the remote ref"),
+            head_of(&origin),
+            "the remote ref did not move",
+        );
+
+        std::fs::remove_dir_all(&origin).expect("clean up");
+        std::fs::remove_dir_all(&clone).expect("clean up");
+    }
+
+    #[test]
+    fn a_push_sends_the_commits_the_remote_was_missing() {
+        let (origin, clone) = cloned("push");
+        // git refuses a push onto the branch a non-bare repository has checked out, and a
+        // scratch repository is the only kind here.
+        git_in(&origin, &["config", "receive.denyCurrentBranch", "ignore"]);
+        commit_in(&clone, "b.txt", "mine");
+
+        let git = Git::in_work_dir(&clone);
+        assert_eq!(git.unpushed("origin", "main"), Some(1));
+
+        git.push("origin", "main", false).expect("push");
+
+        assert_eq!(git.unpushed("origin", "main"), Some(0));
+        assert_eq!(
+            git.run(&["rev-parse", "refs/remotes/origin/main"])
+                .expect("read the remote ref"),
+            head_of(&clone),
+        );
+
+        std::fs::remove_dir_all(&origin).expect("clean up");
+        std::fs::remove_dir_all(&clone).expect("clean up");
+    }
+
+    #[test]
+    fn a_new_branch_is_the_one_that_is_checked_out() {
+        let path = scratch_repository("branch");
+        commit_in(&path, "a.txt", "one");
+
+        let git = Git::in_work_dir(&path);
+        git.branch("feat/dialogs").expect("create the branch");
+
+        assert_eq!(
+            git.run(&["rev-parse", "--abbrev-ref", "HEAD"])
+                .expect("read the branch"),
+            "feat/dialogs",
+        );
 
         std::fs::remove_dir_all(&path).expect("clean up");
     }

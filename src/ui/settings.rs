@@ -10,21 +10,26 @@ const SIDEBAR_WIDTH: f32 = 200.0;
 const ROW_ICON: f32 = 24.0;
 const CHOICE_ICON: f32 = 20.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Category {
     Appearance,
     Repositories,
+    /// One repository on its own, which is what right-clicking a repository opens.
+    Repository(PathBuf),
     About,
 }
 
 impl Category {
+    /// The ones that belong to gg rather than to a repository, which is what the settings
+    /// sidebar always lists.
     const ALL: [Self; 3] = [Self::Appearance, Self::Repositories, Self::About];
 
-    fn title(self) -> &'static str {
+    fn title(&self) -> String {
         match self {
-            Self::Appearance => "Appearance",
-            Self::Repositories => "Repositories",
-            Self::About => "About",
+            Self::Appearance => "Appearance".to_owned(),
+            Self::Repositories => "Repositories".to_owned(),
+            Self::Repository(path) => super::name_of(path),
+            Self::About => "About".to_owned(),
         }
     }
 }
@@ -50,10 +55,11 @@ pub struct Picker {
     pub choices: Vec<PathBuf>,
 }
 
-pub fn view(app: &App, category: Category) -> Element<'_, Message> {
+pub fn view<'a>(app: &'a App, category: &'a Category) -> Element<'a, Message> {
     let body = match category {
         Category::Appearance => appearance(app),
         Category::Repositories => repositories(app),
+        Category::Repository(path) => repository(app, path),
         Category::About => about(),
     };
 
@@ -68,11 +74,13 @@ pub fn view(app: &App, category: Category) -> Element<'_, Message> {
     .into()
 }
 
-fn sidebar(current: Category) -> Element<'static, Message> {
-    let categories = Category::ALL.map(|category| {
+fn sidebar(current: &Category) -> Element<'static, Message> {
+    let row = |category: Category, current: &Category| {
+        let chosen = &category == current;
+
         button(text(category.title()).size(BODY))
             .on_press(Message::SettingsOpened(category))
-            .style(if category == current {
+            .style(if chosen {
                 button::secondary
             } else {
                 button::text
@@ -80,7 +88,16 @@ fn sidebar(current: Category) -> Element<'static, Message> {
             .width(Fill)
             .padding([5, 10])
             .into()
-    });
+    };
+
+    let mut categories: Vec<Element<'static, Message>> =
+        Category::ALL.map(|category| row(category, current)).into();
+
+    // The repository is only listed while one of them is what the page is showing: there is
+    // no repository this page belongs to otherwise.
+    if let Category::Repository(path) = current {
+        categories.push(row(Category::Repository(path.clone()), current));
+    }
 
     container(
         column![
@@ -90,7 +107,7 @@ fn sidebar(current: Category) -> Element<'static, Message> {
                 .width(Fill)
                 .padding([5, 10]),
             text("settings").size(BODY).style(text::secondary),
-            column(categories).spacing(2),
+            Column::with_children(categories).spacing(2),
         ]
         .spacing(10),
     )
@@ -252,6 +269,50 @@ fn repositories(app: &App) -> Column<'_, Message> {
     }
     page.push(Column::with_children(adding).spacing(6).into());
     page.push(directories(app).into());
+
+    Column::with_children(page)
+}
+
+/// One repository, reached by right-clicking it rather than by finding it in the list. The
+/// icon is what there is to set today; what else belongs to a repository rather than to gg
+/// lands here as it is written.
+fn repository<'a>(app: &'a App, path: &'a Path) -> Column<'a, Message> {
+    let icon = app.state.icon(path);
+    let picking = app
+        .form
+        .picker
+        .as_ref()
+        .is_some_and(|picker| picker.repository == path);
+
+    let mut page: Vec<Element<'a, Message>> = vec![
+        text(super::name_of(path)).size(TITLE).into(),
+        text(path.display().to_string())
+            .size(SMALL)
+            .style(text::secondary)
+            .into(),
+        row![
+            button(icons::repository(icon.as_deref(), ROW_ICON))
+                .on_press(Message::IconPickerToggled(path.to_owned()))
+                .style(if picking {
+                    button::secondary
+                } else {
+                    button::text
+                })
+                .padding(4),
+            column![
+                text("Icon").size(BODY),
+                note("shown in the sidebar, the launcher and the toolbar"),
+            ]
+            .spacing(2),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center)
+        .into(),
+    ];
+
+    if let Some(picker) = &app.form.picker {
+        page.push(icon_choices(picker));
+    }
 
     Column::with_children(page)
 }

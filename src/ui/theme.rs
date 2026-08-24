@@ -227,6 +227,27 @@ pub fn chrome(theme: &Theme) -> iced::widget::container::Style {
     filled(theme.extended_palette().background.strong.color)(theme)
 }
 
+/// A row or a control that says it takes a press by lighting up under the pointer. The one
+/// style the toolbar, the context menus and the remote dialog share, so a pressable thing
+/// looks the same wherever it is drawn.
+pub fn row(theme: &Theme, status: iced::widget::button::Status) -> iced::widget::button::Style {
+    let palette = theme.extended_palette();
+    let lit = matches!(
+        status,
+        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+    );
+
+    iced::widget::button::Style {
+        background: lit.then(|| palette.background.strong.color.into()),
+        text_color: palette.background.base.text,
+        border: iced::Border {
+            radius: 5.0.into(),
+            ..iced::Border::default()
+        },
+        ..iced::widget::button::Style::default()
+    }
+}
+
 pub fn filled(colour: Color) -> impl Fn(&Theme) -> iced::widget::container::Style + Copy {
     move |_: &Theme| iced::widget::container::Style {
         background: Some(colour.into()),

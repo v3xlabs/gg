@@ -4,6 +4,7 @@ mod graph;
 mod icons;
 mod launcher;
 mod menu;
+mod remotes;
 mod settings;
 pub mod theme;
 mod when;
@@ -66,6 +67,11 @@ const OVERSCAN: usize = 8;
 /// Enough to pick from without the list becoming the page.
 const COMPLETIONS_SHOWN: usize = 8;
 const CONTEXT_WIDTH: f32 = 220.0;
+/// One height for every row, which is what lets a submenu be placed beside its group by
+/// counting the rows above it.
+const CONTEXT_ROW: f32 = 24.0;
+const CONTEXT_PAD: f32 = 4.0;
+const CONTEXT_GAP: f32 = 1.0;
 
 /// Without this, a click that moves by a pixel reorders the list under the reader.
 const HOLD_TO_DRAG: std::time::Duration = std::time::Duration::from_millis(180);
@@ -348,8 +354,22 @@ pub struct App {
     modifiers: keyboard::Modifiers,
     context: Option<Context>,
     launcher: Option<launcher::Launcher>,
+    dialog: Option<remotes::Dialog>,
+    /// The name being typed into the branch / tag column, which is the only time that field
+    /// is drawn.
+    branch_name: Option<String>,
+    report: Option<Report>,
     /// True while a repository is being read on another thread.
     reading: bool,
+}
+
+/// What the footer says about the last thing the toolbar was asked to do. Fetch and push
+/// reach the network, so a reader needs to be told that one is running as well as how it
+/// ended.
+enum Report {
+    Running(String),
+    Done(String),
+    Failed(String),
 }
 
 /// Worked out before anything is changed, so the launcher's borrow of the window is over
@@ -388,10 +408,12 @@ pub enum Target {
     Repository(PathBuf),
 }
 
-/// A context menu, and the corner of the window it was opened at.
+/// A context menu, the corner of the window it was opened at, and which of its groups the
+/// pointer has opened.
 struct Context {
     at: (f32, f32),
     target: Target,
+    open: Option<usize>,
 }
 
 /// Kept outside the interface state: a message for every mouse move would rebuild the
@@ -402,48 +424,110 @@ fn pointer() -> (f32, f32) {
     POINTER.lock().map(|at| *at).unwrap_or_default()
 }
 
+/// A row of a context menu. One level of nesting is all a menu here needs: a group names
+/// what a set of actions have in common, and its children say which one.
+enum Row {
+    Item(String, Option<Message>),
+    Group(String, Vec<(String, Option<Message>)>),
+}
+
+impl Row {
+    fn label(&self) -> &str {
+        match self {
+            Self::Item(label, _) | Self::Group(label, _) => label,
+        }
+    }
+}
+
+fn item(label: &str, message: Option<Message>) -> Row {
+    Row::Item(label.to_owned(), message)
+}
+
 /// A `None` message is an item that is drawn but not wired up yet.
-fn context_items(target: &Target) -> Vec<(&'static str, Option<Message>)> {
+fn context_items(target: &Target) -> Vec<Row> {
     match target {
         Target::Commit(id) => vec![
-            ("copy the sha", Some(Message::TextCopied(id.to_string()))),
-            ("copy the message", Some(Message::CommitMessageCopied)),
-            ("check out", None),
-            ("revert", None),
-            ("cherry-pick", None),
+            Row::Group(
+                "copy".to_owned(),
+                vec![
+                    (
+                        "the sha".to_owned(),
+                        Some(Message::TextCopied(id.to_string())),
+                    ),
+                    ("the message".to_owned(), Some(Message::CommitMessageCopied)),
+                ],
+            ),
+            item("check out", None),
+            item("revert", None),
+            item("cherry-pick", None),
+            Row::Group(
+                "reset".to_owned(),
+                vec![
+                    ("soft".to_owned(), None),
+                    ("mixed".to_owned(), None),
+                    ("hard".to_owned(), None),
+                ],
+            ),
         ],
         Target::Reference { kind, name, target } => {
-            let mut items = vec![
-                ("copy the name", Some(Message::TextCopied(name.clone()))),
-                (
-                    "copy the sha",
-                    Some(Message::TextCopied(target.to_string())),
-                ),
-            ];
+            let mut items = vec![Row::Group(
+                "copy".to_owned(),
+                vec![
+                    (
+                        "the name".to_owned(),
+                        Some(Message::TextCopied(name.clone())),
+                    ),
+                    (
+                        "the sha".to_owned(),
+                        Some(Message::TextCopied(target.to_string())),
+                    ),
+                ],
+            )];
 
             match kind {
-                LabelKind::Tag => items.push(("delete the tag", None)),
+                LabelKind::Tag => items.push(Row::Group(
+                    "delete".to_owned(),
+                    vec![(format!("tag {name}"), None)],
+                )),
                 LabelKind::Stash => {
-                    items.push(("apply", None));
-                    items.push(("drop", None));
+                    items.push(item("apply", None));
+                    items.push(item("drop", None));
                 }
                 _ => {
-                    items.push(("check out", None));
-                    items.push(("merge into the current branch", None));
-                    items.push(("rename", None));
-                    items.push(("delete", None));
+                    items.push(item("check out", None));
+                    items.push(item("merge into the current branch", None));
+                    items.push(item("rename", None));
+                    items.push(Row::Group(
+                        "delete".to_owned(),
+                        vec![(format!("branch {name}"), None)],
+                    ));
                 }
             }
 
             items
         }
         Target::Repository(path) => vec![
-            ("open", Some(Message::RepositoryOpened(path.clone()))),
-            (
-                "copy the path",
-                Some(Message::TextCopied(path.display().to_string())),
+            item("open", Some(Message::RepositoryOpened(path.clone()))),
+            Row::Group(
+                "copy".to_owned(),
+                vec![
+                    (
+                        "the path".to_owned(),
+                        Some(Message::TextCopied(path.display().to_string())),
+                    ),
+                    (
+                        "the name".to_owned(),
+                        Some(Message::TextCopied(name_of(path))),
+                    ),
+                ],
             ),
-            (
+            item(
+                "settings",
+                Some(Message::SettingsOpened(settings::Category::Repository(
+                    path.clone(),
+                ))),
+            ),
+            item(
                 "remove from the list",
                 Some(Message::RepositoryRemoved(path.clone())),
             ),
@@ -452,38 +536,107 @@ fn context_items(target: &Target) -> Vec<(&'static str, Option<Message>)> {
 }
 
 fn context_menu(context: &Context) -> Element<'_, Message> {
-    let items = context_items(&context.target)
-        .into_iter()
-        .map(|(label, message)| {
-            let enabled = message.is_some();
+    let entries = context_items(&context.target);
+    let open = context
+        .open
+        .filter(|index| matches!(entries.get(*index), Some(Row::Group(..))));
 
-            button(text(label).size(BODY))
-                .on_press_maybe(message)
-                .style(move |theme: &Theme, status| {
-                    let palette = theme.extended_palette();
-                    let lit = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    let rows = entries.iter().enumerate().map(|(index, entry)| {
+        let group = matches!(entry, Row::Group(..));
+        let message = match entry {
+            Row::Item(_, message) => message.clone(),
+            // A group takes the press rather than letting it fall through to the layer that
+            // dismisses the menu.
+            Row::Group(..) => Some(Message::ContextEntered(Some(index))),
+        };
 
-                    button::Style {
-                        background: lit.then(|| palette.background.strong.color.into()),
-                        text_color: if enabled {
-                            palette.background.base.text
-                        } else {
-                            palette.background.weak.text
-                        },
-                        border: iced::Border {
-                            radius: 4.0.into(),
-                            ..iced::Border::default()
-                        },
-                        ..button::Style::default()
-                    }
-                })
-                .padding([4, 10])
-                .width(Fill)
-                .into()
-        });
+        let mut line = row![clipped(text(entry.label().to_owned())).size(BODY)]
+            .align_y(iced::Alignment::Center);
+        if group {
+            line = line
+                .push(Space::new().width(Fill))
+                .push(text("\u{25b8}").size(BODY));
+        }
 
-    let panel = container(Column::with_children(items).spacing(1))
-        .padding(4)
+        mouse_area(context_row(line.into(), message, !group))
+            .on_enter(Message::ContextEntered(group.then_some(index)))
+            .into()
+    });
+
+    let panel = context_panel(Column::with_children(rows).spacing(CONTEXT_GAP));
+    let (x, y) = context.at;
+    // Both layers fill the window: a stack takes its size from its first child, and a
+    // submenu reaches further right than the menu it hangs off.
+    let menu = column![
+        Space::new().height(Length::Fixed(y)),
+        row![Space::new().width(Length::Fixed(x)), panel],
+    ]
+    .width(Fill)
+    .height(Fill);
+
+    let Some(index) = open else {
+        return menu.into();
+    };
+    let Some(Row::Group(_, children)) = entries.get(index) else {
+        return menu.into();
+    };
+
+    let rows = children.iter().map(|(label, message)| {
+        context_row(
+            clipped(text(label.to_owned())).size(BODY).into(),
+            message.clone(),
+            true,
+        )
+    });
+
+    // Placed by counting rows rather than by measuring: every row in this menu is one
+    // height, which is what CONTEXT_ROW is for.
+    let above = CONTEXT_PAD + index as f32 * (CONTEXT_ROW + CONTEXT_GAP);
+    let submenu = column![
+        Space::new().height(Length::Fixed(y + above)),
+        row![
+            // Overlapping the parent by the panel border, so the pointer crossing between
+            // the two never leaves both.
+            Space::new().width(Length::Fixed(x + CONTEXT_WIDTH - 2.0)),
+            context_panel(Column::with_children(rows).spacing(CONTEXT_GAP)),
+        ],
+    ]
+    .width(Fill)
+    .height(Fill);
+
+    stack![menu, submenu].into()
+}
+
+fn context_row(
+    line: Element<'_, Message>,
+    message: Option<Message>,
+    dims: bool,
+) -> Element<'_, Message> {
+    let enabled = message.is_some() || !dims;
+
+    button(line)
+        .on_press_maybe(message)
+        .style(move |theme: &Theme, status| {
+            let palette = theme.extended_palette();
+
+            button::Style {
+                text_color: if enabled {
+                    palette.background.base.text
+                } else {
+                    palette.background.weak.text
+                },
+                ..theme::row(theme, status)
+            }
+        })
+        .padding([0, 10])
+        .width(Fill)
+        .height(Length::Fixed(CONTEXT_ROW))
+        .into()
+}
+
+fn context_panel(rows: Column<'_, Message>) -> Element<'_, Message> {
+    container(rows)
+        .padding(CONTEXT_PAD)
         .width(Length::Fixed(CONTEXT_WIDTH))
         .style(|theme: &Theme| {
             let palette = theme.extended_palette();
@@ -502,15 +655,8 @@ fn context_menu(context: &Context) -> Element<'_, Message> {
                 },
                 ..container::Style::default()
             }
-        });
-
-    let (x, y) = context.at;
-
-    column![
-        Space::new().height(Length::Fixed(y)),
-        row![Space::new().width(Length::Fixed(x)), panel],
-    ]
-    .into()
+        })
+        .into()
 }
 
 /// A repository being carried to a new place in the sidebar. `moved` tells a drag from a
@@ -532,7 +678,7 @@ impl Reorder {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Page {
     Repository,
     Settings(settings::Category),
@@ -637,6 +783,9 @@ struct Repository {
     authors: Vec<graph::Author>,
     /// Remote name to the host its URL points at, so "origin/main" can show its forge.
     remotes: HashMap<String, String>,
+    /// Every remote, including the ones whose URL carries no host, which is what fetch and
+    /// push offer to reach.
+    remote_names: Vec<String>,
     warnings: Vec<Warning>,
     /// The commits the stash reflog points at, so the graph draws a stash as one thing
     /// rather than as the three commits git keeps it in.
@@ -658,6 +807,7 @@ pub struct Reading {
     lanes: usize,
     authors: Vec<graph::Author>,
     remotes: HashMap<String, String>,
+    remote_names: Vec<String>,
     warnings: Vec<Warning>,
     worktrees: Vec<read::Worktree>,
 }
@@ -712,6 +862,11 @@ impl Reading {
             rows,
             commits,
             lanes,
+            remote_names: handle
+                .remote_names()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             remotes: remote_hosts(&handle),
             warnings,
             worktrees: read::worktrees(&handle),
@@ -754,6 +909,7 @@ impl Repository {
             lanes: reading.lanes,
             authors: reading.authors,
             remotes: reading.remotes,
+            remote_names: reading.remote_names,
             warnings: reading.warnings,
             worktrees: reading.worktrees,
         })
@@ -842,6 +998,16 @@ pub enum Message {
     CommitDescriptionActed(text_editor::Action),
     CommitRequested,
     FaceFetched([u8; 32], Option<PathBuf>),
+    FetchPressed,
+    PushPressed,
+    BranchPressed,
+    RemoteToggled(String),
+    UpstreamToggled,
+    DialogConfirmed,
+    RemoteFinished(Result<String, String>),
+    BranchNameChanged(String),
+    BranchCreated,
+    ContextEntered(Option<usize>),
 }
 
 impl App {
@@ -897,6 +1063,9 @@ impl App {
             modifiers: keyboard::Modifiers::empty(),
             context: None,
             launcher: None,
+            dialog: None,
+            branch_name: None,
+            report: None,
             reading: false,
             pictures: HashMap::new(),
             asked: HashSet::new(),
@@ -1024,6 +1193,20 @@ impl App {
         let Ok(repository) = &self.repository else {
             return;
         };
+
+        // The sidebar row for this repository was read when it was listed, so a checkout
+        // here leaves it naming the branch that was left behind.
+        if let Some(entry) = self
+            .repositories
+            .iter_mut()
+            .find(|entry| entry.path == repository.path)
+        {
+            entry.branch = Ok(repository
+                .head
+                .name
+                .clone()
+                .unwrap_or_else(|| "detached".to_owned()));
+        }
 
         let again =
             selected.and_then(|id| repository.commits.iter().position(|commit| commit.id == id));
@@ -1486,6 +1669,72 @@ impl App {
         }
     }
 
+    fn fetch(&mut self, remotes: Vec<String>) -> Task<Message> {
+        let named = remotes.join(", ");
+
+        self.remote_task(format!("fetching {named}"), move |git| {
+            git.fetch(&remotes).map(|()| format!("fetched {named}"))
+        })
+    }
+
+    /// One remote at a time rather than one `git push` with several: a remote that refuses
+    /// the push should say which one it was.
+    fn push(&mut self, branch: String, remotes: Vec<String>, upstream: bool) -> Task<Message> {
+        let named = remotes.join(", ");
+        let running = format!("pushing {branch} to {named}");
+
+        self.remote_task(running, move |git| {
+            for remote in &remotes {
+                git.push(remote, &branch, upstream)?;
+            }
+
+            Ok(format!("pushed {branch} to {named}"))
+        })
+    }
+
+    /// What a push would send to each remote, read before the dialog is drawn because that
+    /// is the number the reader decides on.
+    fn destinations(&self, branch: &str, remotes: &[String]) -> Vec<remotes::Destination> {
+        let Ok(repository) = &self.repository else {
+            return Vec::new();
+        };
+
+        let git = command::Git::in_work_dir(&repository.path);
+        remotes
+            .iter()
+            .map(|remote| remotes::Destination {
+                commits: git.unpushed(remote, branch),
+                exists: repository
+                    .references
+                    .remote_branches
+                    .iter()
+                    .any(|reference| reference.name == format!("{remote}/{branch}")),
+                remote: remote.clone(),
+            })
+            .collect()
+    }
+
+    /// Fetch and push reach the network, which takes as long as the network takes, so they
+    /// run off the interface thread and land back as [`Message::RemoteFinished`]. The `Ok`
+    /// string is what the footer says once it is done.
+    fn remote_task(
+        &mut self,
+        running: String,
+        work: impl FnOnce(&command::Git) -> Result<String, command::Error> + Send + 'static,
+    ) -> Task<Message> {
+        let Ok(repository) = &self.repository else {
+            return Task::none();
+        };
+
+        let path = repository.path.clone();
+        self.report = Some(Report::Running(running));
+
+        Task::perform(
+            async move { work(&command::Git::in_work_dir(path)).map_err(|error| error.to_string()) },
+            Message::RemoteFinished,
+        )
+    }
+
     /// A picture is asked for once per author and kept whichever repository is open, because
     /// the cache on disk is shared.
     fn request_faces(&mut self) -> Task<Message> {
@@ -1605,6 +1854,8 @@ impl App {
                 self.menu = None;
                 self.inbox = false;
                 self.context = None;
+                self.dialog = None;
+                self.branch_name = None;
 
                 // A theme worn while walking the list was never settled on.
                 if let Some(launcher) = self.launcher.take()
@@ -1667,6 +1918,7 @@ impl App {
             Message::SettingsOpened(category) => {
                 self.menu = None;
                 self.inbox = false;
+                self.context = None;
                 self.page = Page::Settings(category);
                 self.rescan_directories();
             }
@@ -1785,6 +2037,7 @@ impl App {
                 self.context = Some(Context {
                     at: pointer(),
                     target,
+                    open: None,
                 });
             }
             Message::TextCopied(text) => {
@@ -2035,6 +2288,145 @@ impl App {
                     return task;
                 }
             }
+            Message::FetchPressed => {
+                let Ok(repository) = &self.repository else {
+                    return Task::none();
+                };
+                let remotes = repository.remote_names.clone();
+
+                match remotes.len() {
+                    0 => {
+                        self.report = Some(Report::Failed(
+                            "this repository has no remote to fetch from".to_owned(),
+                        ));
+                    }
+                    1 => return self.fetch(remotes),
+                    _ => self.dialog = Some(remotes::Dialog::fetch(remotes)),
+                }
+            }
+            Message::PushPressed => {
+                let Ok(repository) = &self.repository else {
+                    return Task::none();
+                };
+                let Some(branch) = repository.head.name.clone() else {
+                    self.report = Some(Report::Failed(
+                        "HEAD is detached, so there is no branch to push".to_owned(),
+                    ));
+                    return Task::none();
+                };
+                let remotes = repository.remote_names.clone();
+
+                match remotes.len() {
+                    0 => {
+                        self.report = Some(Report::Failed(
+                            "this repository has no remote to push to".to_owned(),
+                        ));
+                    }
+                    1 => return self.push(branch, remotes, false),
+                    _ => {
+                        let destinations = self.destinations(&branch, &remotes);
+                        self.dialog = Some(remotes::Dialog::push(branch, destinations));
+                    }
+                }
+            }
+            Message::BranchPressed => {
+                let Ok(repository) = &self.repository else {
+                    return Task::none();
+                };
+                let Some(head) = repository.head.id else {
+                    self.report = Some(Report::Failed(
+                        "there is no commit here to branch from yet".to_owned(),
+                    ));
+                    return Task::none();
+                };
+
+                let offset = repository
+                    .commits
+                    .iter()
+                    .position(|commit| commit.id == head)
+                    .and_then(|index| repository.tops.get(index).copied());
+
+                // The field is drawn in the branch / tag column of the row HEAD is on, so
+                // both the column and that row have to be on screen for it to be typed in.
+                self.columns.labels = true;
+                self.diff = None;
+                self.branch_name = Some(String::new());
+                self.report = None;
+
+                let mut tasks = vec![iced::advanced::widget::operate(
+                    iced::advanced::widget::operation::focusable::focus(branch_field()),
+                )];
+                if let Some(offset) = offset {
+                    tasks.push(iced::advanced::widget::operate(
+                        iced::advanced::widget::operation::scrollable::scroll_to(
+                            history_scroll(),
+                            iced::widget::scrollable::AbsoluteOffset {
+                                x: Some(0.0),
+                                y: Some((offset - ROW_HEIGHT * 3.0).max(0.0)),
+                            },
+                        ),
+                    ));
+                }
+
+                return Task::batch(tasks);
+            }
+            Message::BranchNameChanged(name) => self.branch_name = Some(name),
+            Message::BranchCreated => {
+                let Some(name) = self.branch_name.take() else {
+                    return Task::none();
+                };
+                let name = name.trim().to_owned();
+                let Ok(repository) = &self.repository else {
+                    return Task::none();
+                };
+                if name.is_empty() {
+                    return Task::none();
+                }
+
+                let git = command::Git::in_work_dir(&repository.path);
+                match git.branch(&name) {
+                    Ok(()) => {
+                        self.report = Some(Report::Done(format!("on {name}")));
+                        return self.read_repository();
+                    }
+                    Err(error) => self.report = Some(Report::Failed(error.to_string())),
+                }
+            }
+            Message::RemoteToggled(remote) => {
+                if let Some(dialog) = &mut self.dialog {
+                    dialog.toggle(&remote);
+                }
+            }
+            Message::UpstreamToggled => {
+                if let Some(remotes::Dialog::Push { upstream, .. }) = &mut self.dialog {
+                    *upstream = !*upstream;
+                }
+            }
+            Message::DialogConfirmed => {
+                let Some(dialog) = self.dialog.take() else {
+                    return Task::none();
+                };
+                let taken = dialog.taken();
+
+                return match dialog {
+                    remotes::Dialog::Fetch { .. } => self.fetch(taken),
+                    remotes::Dialog::Push {
+                        branch, upstream, ..
+                    } => self.push(branch, taken, upstream),
+                };
+            }
+            Message::RemoteFinished(result) => match result {
+                Ok(done) => {
+                    self.report = Some(Report::Done(done));
+                    return self.read_repository();
+                }
+                Err(error) => self.report = Some(Report::Failed(error)),
+            },
+            Message::ContextEntered(group) => {
+                if let Some(context) = &mut self.context {
+                    context.open = group;
+                }
+            }
             Message::FaceFetched(fingerprint, path) => {
                 if let Some(faces) = path.as_deref().and_then(Faces::read) {
                     self.pictures.insert(fingerprint, faces);
@@ -2056,12 +2448,16 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let body = match self.page {
+        let body = match &self.page {
             Page::Settings(category) => settings::view(self, category),
             Page::Repository => self.repository_page(),
         };
 
-        let page = column![menu::bar(self.menu), body, footer(self.scale)];
+        let page = column![
+            menu::bar(self.menu),
+            body,
+            footer(self.scale, self.report.as_ref())
+        ];
 
         // A row only hears the button let go of while the pointer is still on it, so a drag
         // that ends anywhere else is caught here. Always the same widget: wrapping it only
@@ -2075,7 +2471,12 @@ impl App {
         }
         let page: Element<'_, Message> = tracker.into();
 
-        if self.menu.is_none() && !self.inbox && self.launcher.is_none() && self.context.is_none() {
+        if self.menu.is_none()
+            && !self.inbox
+            && self.launcher.is_none()
+            && self.context.is_none()
+            && self.dialog.is_none()
+        {
             return page;
         }
 
@@ -2088,6 +2489,11 @@ impl App {
         }
         if let Some(launcher) = &self.launcher {
             layers.push(launcher::view(self, launcher));
+        }
+        // A dialog only ever opens over an open repository, which is where the hosts it
+        // names its remotes by come from.
+        if let (Some(dialog), Ok(repository)) = (&self.dialog, &self.repository) {
+            layers.push(remotes::view(dialog, &repository.remotes));
         }
         if let Some(context) = &self.context {
             layers.push(context_menu(context));
@@ -2548,7 +2954,7 @@ fn percentage(scale: f32) -> String {
     format!("{}%", (scale * 100.0).round())
 }
 
-fn footer(scale: f32) -> Element<'static, Message> {
+fn footer(scale: f32, report: Option<&Report>) -> Element<'_, Message> {
     let step = |label: &'static str, message: Message| {
         button(text(label).size(BODY))
             .on_press(message)
@@ -2556,9 +2962,25 @@ fn footer(scale: f32) -> Element<'static, Message> {
             .padding([0, 8])
     };
 
+    let said: Element<'_, Message> = match report {
+        None => Space::new().into(),
+        Some(Report::Running(note)) => clipped(text(format!("{note}\u{2026}")))
+            .size(BODY)
+            .style(text::secondary)
+            .into(),
+        Some(Report::Done(note)) => clipped(text(note.as_str()))
+            .size(BODY)
+            .style(text::secondary)
+            .into(),
+        Some(Report::Failed(note)) => clipped(text(note.as_str()))
+            .size(BODY)
+            .style(text::danger)
+            .into(),
+    };
+
     container(
         row![
-            Space::new().width(Fill),
+            container(said).width(Fill).clip(true),
             step("\u{2212}", Message::ZoomOut),
             text(percentage(scale)).size(BODY).style(text::secondary),
             step("+", Message::ZoomIn),
@@ -2675,9 +3097,9 @@ fn toolbar<'a>(app: &'a App, repository: Option<&'a Repository>) -> Element<'a, 
         row![
             open,
             Space::new().width(Fill),
-            toolbar_action("fetch", icons::Glyph::Fetch),
-            toolbar_action("push", icons::Glyph::Push),
-            toolbar_action("branch", icons::Glyph::Branch),
+            toolbar_action("fetch", icons::Glyph::Fetch, Message::FetchPressed),
+            toolbar_action("push", icons::Glyph::Push, Message::PushPressed),
+            toolbar_action("branch", icons::Glyph::Branch, Message::BranchPressed),
         ]
         .spacing(4)
         .height(Fill)
@@ -2692,8 +3114,13 @@ fn toolbar<'a>(app: &'a App, repository: Option<&'a Repository>) -> Element<'a, 
     .into()
 }
 
-/// Drawn but not wired to anything yet, so it takes no press.
-fn toolbar_action(label: &'static str, glyph: icons::Glyph) -> Element<'static, Message> {
+/// Always pressable, whatever the repository holds. A press that cannot do anything says
+/// so in the footer, which is worth more than a control that looks broken.
+fn toolbar_action(
+    label: &'static str,
+    glyph: icons::Glyph,
+    message: Message,
+) -> Element<'static, Message> {
     button(
         column![
             icons::sized(glyph, TOOLBAR_GLYPH),
@@ -2702,7 +3129,8 @@ fn toolbar_action(label: &'static str, glyph: icons::Glyph) -> Element<'static, 
         .spacing(2)
         .align_x(iced::Alignment::Center),
     )
-    .style(button::text)
+    .on_press(message)
+    .style(theme::row)
     .padding([2, 10])
     .into()
 }
@@ -3218,12 +3646,21 @@ impl App {
                     let selected = self.selected.is_some_and(|selected| selected.holds(*index));
                     let lane = repository.rows.get(*index).map_or(0, |row| row.lane);
                     let tint = lane_colour(self.colours, lane);
-                    names = names.push(label_cell(
-                        self.labels.get(&commit.id),
-                        tint,
-                        self.widths.labels,
-                        commit.id,
-                    ));
+                    // The new branch will be drawn in this cell, so it is typed there too.
+                    let naming = self
+                        .branch_name
+                        .as_ref()
+                        .filter(|_| repository.head.id == Some(commit.id));
+
+                    names = names.push(match naming {
+                        Some(name) => naming_cell(name, tint, self.widths.labels),
+                        None => label_cell(
+                            self.labels.get(&commit.id),
+                            tint,
+                            self.widths.labels,
+                            commit.id,
+                        ),
+                    });
                     joint = joint.push(joint_cell(
                         self.labelled.contains(&commit.id).then_some(tint),
                         joint_lit,
@@ -3410,6 +3847,41 @@ fn column_menu(columns: Columns) -> Element<'static, Message> {
     .width(Length::Fixed(160.0))
     .style(container::rounded_box)
     .into()
+}
+
+/// The branch being named, drawn as the chip it is about to become and in the cell it will
+/// land in. It takes the place of the labels already on the row for as long as it is open.
+fn naming_cell(name: &str, tint: Color, width: f32) -> Element<'_, Message> {
+    let field = text_input("name the branch", name)
+        .id(branch_field())
+        .on_input(Message::BranchNameChanged)
+        .on_submit(Message::BranchCreated)
+        .size(BODY)
+        .padding([1, 5])
+        .style(move |theme: &Theme, _| {
+            let palette = theme.extended_palette();
+
+            text_input::Style {
+                background: Color { a: 0.22, ..tint }.into(),
+                border: iced::Border {
+                    color: tint,
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                icon: palette.background.base.text,
+                placeholder: palette.background.weak.text,
+                value: palette.background.base.text,
+                selection: Color { a: 0.35, ..tint },
+            }
+        });
+
+    container(field)
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(ROW_HEIGHT))
+        .align_y(iced::alignment::Vertical::Center)
+        .padding(iced::Padding::default().left(f32::from(CELL_PAD)))
+        .clip(true)
+        .into()
 }
 
 /// The first name is shown and the rest collapse into a count, so twenty tags on one commit
@@ -3683,6 +4155,10 @@ fn gap() -> Element<'static, Message> {
 
 fn short_id(id: gix::ObjectId) -> String {
     id.to_hex_with_len(8).to_string()
+}
+
+fn branch_field() -> iced::widget::Id {
+    iced::widget::Id::new("branch-name")
 }
 
 fn history_scroll() -> iced::widget::Id {
