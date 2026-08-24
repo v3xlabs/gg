@@ -171,6 +171,8 @@ struct Label {
     short: String,
     host: Option<String>,
     pull: Option<u32>,
+    /// Whether HEAD is at this name, which is what the tick in front of it says.
+    head: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1372,18 +1374,10 @@ impl App {
                 short,
                 host,
                 pull: pulls.get(&target).copied(),
+                head: false,
             });
         };
 
-        if let Some(head) = repository.head.id {
-            add(
-                head,
-                LabelKind::Head,
-                "HEAD".to_owned(),
-                "HEAD".to_owned(),
-                None,
-            );
-        }
         for branch in &repository.references.local_branches {
             add(
                 branch.target,
@@ -1435,6 +1429,33 @@ impl App {
                     tag.name.clone(),
                     None,
                 );
+            }
+        }
+
+        // A tick on a name the commit already carries says where HEAD is in less room than
+        // a chip of its own, which only a commit with no name at all needs.
+        if let Some(id) = repository.head.id {
+            let at_head = labels.entry(id).or_default();
+            let attached = repository.head.name.as_deref();
+            let ticked = at_head
+                .iter()
+                .position(|label| Some(label.name.as_str()) == attached)
+                .or_else(|| (!at_head.is_empty()).then_some(0));
+
+            match ticked {
+                // The cell shows the first name and counts the rest, so the ticked one leads.
+                Some(index) => {
+                    at_head[index].head = true;
+                    at_head[..=index].rotate_right(1);
+                }
+                None => at_head.push(Label {
+                    kind: LabelKind::Head,
+                    name: "HEAD".to_owned(),
+                    short: "HEAD".to_owned(),
+                    host: None,
+                    pull: pulls.get(&id).copied(),
+                    head: true,
+                }),
             }
         }
 
@@ -3453,13 +3474,22 @@ fn label_cell(
 /// A list rather than chips: chips would each be a different width and no two names would
 /// start in the same place.
 fn label_list(labels: &[Label]) -> Element<'_, Message> {
-    let lines = labels.iter().map(|label| {
-        let mut line = row![
-            icons::sized(label.kind.glyph(), LABEL_ICON),
-            text(label.name.as_str()).size(BODY),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center);
+    // The tick keeps a column of its own on every line, or the one name that carries it
+    // would start further along than the rest.
+    let ticked = labels.iter().any(|label| label.head);
+    let lines = labels.iter().map(move |label| {
+        let mut line = row![].spacing(6).align_y(iced::Alignment::Center);
+        if ticked {
+            let mark: Element<'_, Message> = if label.head {
+                icons::sized(icons::Glyph::Check, LABEL_ICON)
+            } else {
+                Space::new().width(Length::Fixed(LABEL_ICON)).into()
+            };
+            line = line.push(mark);
+        }
+        line = line
+            .push(icons::sized(label.kind.glyph(), LABEL_ICON))
+            .push(text(label.name.as_str()).size(BODY));
 
         if let Some(host) = &label.host {
             line = line.push(icons::forge(host, LABEL_ICON));
@@ -3483,6 +3513,9 @@ fn chip(label: &Label, tint: Color) -> Element<'_, Message> {
     // A remote branch leads with nothing: the forge mark on its right already says where it
     // lives, and a globe beside it would say it twice.
     let mut line = row![].spacing(4).align_y(iced::Alignment::Center);
+    if label.head {
+        line = line.push(icons::sized(icons::Glyph::Check, LABEL_ICON));
+    }
     if label.host.is_none() {
         line = line.push(icons::sized(label.kind.glyph(), LABEL_ICON));
     }

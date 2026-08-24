@@ -1,7 +1,7 @@
 use super::{DiffSource, Message, icons, theme};
 use crate::git::read::{ChangeKind, FileChange};
 use iced::widget::{Column, Space, button, canvas, container, rich_text, row, span, stack, text};
-use iced::{Color, Element, Fill, Font, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
+use iced::{Color, Element, Fill, Font, Length, Point, Rectangle, Renderer, Theme, mouse};
 use std::collections::{BTreeMap, HashSet};
 
 /// A commit that touches a vendored directory would otherwise bury everything else under it.
@@ -89,17 +89,19 @@ impl Tree {
             Column::with_children(rows.iter().map(|line| entry(line, source, colours, open)))
                 .width(Fill);
 
-        stack![entries]
-            .push_under(
-                canvas(Gutter {
-                    rows,
-                    cache: &self.gutter,
-                    colours,
-                })
-                .width(Fill)
-                .height(Length::Fixed(height)),
-            )
-            .into()
+        // Over the rows rather than under them: a lit row paints its whole width, and
+        // connectors drawn behind that fill would go once a row was hovered.
+        stack![
+            entries,
+            canvas(Gutter {
+                rows,
+                cache: &self.gutter,
+                colours,
+            })
+            .width(Fill)
+            .height(Length::Fixed(height)),
+        ]
+        .into()
     }
 }
 
@@ -365,6 +367,7 @@ fn entry<'a>(
                 stage_slot(source, path),
                 Space::new().width(Length::Fixed(NOTE_PAD)),
             ]
+            .height(Fill)
             .align_y(iced::Alignment::Center);
 
             let showing = open == Some(*path);
@@ -377,7 +380,11 @@ fn entry<'a>(
                         || matches!(status, button::Status::Hovered | button::Status::Pressed);
 
                     button::Style {
-                        background: lit.then(|| palette.background.strong.color.into()),
+                        background: Some(if lit {
+                            palette.background.strong.color.into()
+                        } else {
+                            band(colour).into()
+                        }),
                         text_color: palette.background.base.text,
                         ..button::Style::default()
                     }
@@ -407,6 +414,7 @@ fn entry<'a>(
                     .color(colours.text_faint),
                 Space::new().width(Length::Fixed(NOTE_PAD)),
             ]
+            .height(Fill)
             .align_y(iced::Alignment::Center),
         )
         .height(Length::Fixed(ROW_HEIGHT))
@@ -424,6 +432,7 @@ fn entry<'a>(
                 .style(button::text)
                 .padding(0),
             ]
+            .height(Fill)
             .align_y(iced::Alignment::Center),
         )
         .height(Length::Fixed(ROW_HEIGHT))
@@ -538,16 +547,9 @@ impl canvas::Program<Message> for Gutter<'_> {
             for (index, line) in self.rows.iter().enumerate() {
                 let top = index as f32 * ROW_HEIGHT;
                 let centre = top + ROW_HEIGHT / 2.0;
-                let status = line.status().map(|kind| hue(kind, self.colours));
-                let colour = status.unwrap_or(self.colours.guide);
-
-                if let Some(status) = status {
-                    frame.fill_rectangle(
-                        Point::new(0.0, top),
-                        Size::new(bounds.width, ROW_HEIGHT),
-                        band(status),
-                    );
-                }
+                let colour = line
+                    .status()
+                    .map_or(self.colours.guide, |kind| hue(kind, self.colours));
 
                 for level in 1..=line.depth {
                     let x = stem_x(level);

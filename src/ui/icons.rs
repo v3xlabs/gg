@@ -144,6 +144,7 @@ pub enum Glyph {
     Tag,
     Remote,
     Head,
+    Check,
     Stash,
     Plus,
     Unfolded,
@@ -422,6 +423,16 @@ impl<Message> canvas::Program<Message> for Icon {
             Glyph::Head => {
                 frame.stroke(&canvas::Path::circle(Point::new(8.0, 8.0), 5.6), stroke);
                 frame.fill(&canvas::Path::circle(Point::new(8.0, 8.0), 2.6), colour);
+            }
+            Glyph::Check => {
+                frame.stroke(
+                    &canvas::Path::new(|builder| {
+                        builder.move_to(Point::new(3.0, 8.5));
+                        builder.line_to(Point::new(6.5, 12.0));
+                        builder.line_to(Point::new(13.0, 4.5));
+                    }),
+                    stroke,
+                );
             }
             Glyph::Stash => {
                 frame.stroke(
